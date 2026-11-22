@@ -4,6 +4,10 @@ from app.schemas.auth import (
     RegisterRequest,
     RegisterResponse,
 )
+from app.schemas.enroll import (
+    CreateEnrollmentCodeRequest,
+    CreateEnrollmentCodeResponse,
+)
 from app.schemas.event import EventBatchRequest, EventBatchResponse, EventItem
 
 __all__ = [
@@ -11,6 +15,8 @@ __all__ = [
     "RegisterResponse",
     "LoginRequest",
     "ChildViewLoginRequest",
+    "CreateEnrollmentCodeRequest",
+    "CreateEnrollmentCodeResponse",
     "EventItem",
     "EventBatchRequest",
     "EventBatchResponse",

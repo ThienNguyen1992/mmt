@@ -1,3 +1,3 @@
-from app.routers import auth, events
+from app.routers import auth, enroll, events
 
-__all__ = ["auth", "events"]
+__all__ = ["auth", "enroll", "events"]
