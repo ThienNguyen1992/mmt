@@ -3,6 +3,7 @@ import requests
 from agent.core import config as agent_config
 from agent.core import event_queue, local_store, notifier
 from agent.core.ipc_server import IPCServer, get_last_tray_heartbeat
+from agent.core.ipc_token import rotate_ipc_token
 from agent.service.agent_runtime import AgentRuntime
 from agent.tray.ipc_client import IPCClient
 
@@ -12,6 +13,7 @@ def test_ipc_server_and_client_routes(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_config, "IPC_DIR", str(tmp_path / "ipc"))
     agent_config.save_config({"device_id": "dev-039", "child_id": "child-039", "enrolled": True})
     local_store.init_schema()
+    token = rotate_ipc_token()
 
     rt = AgentRuntime(start_network=False)
     srv = IPCServer(runtime=rt, port=0)
@@ -52,11 +54,18 @@ def test_ipc_server_and_client_routes(tmp_path, monkeypatch):
         usage = client.get_today_usage()
         assert len(usage["items"]) >= 1
 
-        diag_resp = requests.get(f"http://127.0.0.1:{srv.port}/diagnostics", timeout=3)
+        diag_resp = requests.get(
+            f"http://127.0.0.1:{srv.port}/diagnostics",
+            headers={"X-IPC-Token": token},
+            timeout=3,
+        )
         assert diag_resp.status_code == 200
 
         # /transparency escapes HTML safely
-        trans_resp = requests.get(f"http://127.0.0.1:{srv.port}/transparency", timeout=3)
+        trans_resp = requests.get(
+            f"http://127.0.0.1:{srv.port}/transparency?token={token}",
+            timeout=3,
+        )
         assert trans_resp.status_code == 200
         assert "&lt;script&gt;word.exe&lt;/script&gt;" in trans_resp.text
     finally:
