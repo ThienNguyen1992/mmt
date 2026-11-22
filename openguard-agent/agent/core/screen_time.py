@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from shared.schedule_utils import is_allowed_now
 
@@ -19,13 +19,21 @@ from agent.core.session_lock_monitor import SessionLockMonitor
 
 TICK_INTERVAL_SEC = 5
 WARNING_MARKS_MIN = [10, 5, 1]
+GRACE_PERIOD_SEC = 60
 
 
 class ScreenTimeCounter:
     """Tracks daily screen time against weekday/weekend quotas and weekly schedule."""
 
-    def __init__(self, runtime: Any) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        grace_period_sec: int = GRACE_PERIOD_SEC,
+        on_grace_start: Callable[[int], None] | None = None,
+    ) -> None:
         self.runtime = runtime
+        self.grace_period_sec = max(0, int(grace_period_sec))
+        self.on_grace_start = on_grace_start
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
@@ -39,6 +47,8 @@ class ScreenTimeCounter:
         self._schedule_locked: bool = False
         self._locked_emitted_reason: str | None = None
         self._sent_warnings: set[int] = set()
+        self._in_grace: bool = False
+        self._grace_elapsed_sec: int = 0
         self._load_today_usage()
 
     def _safe_now(self) -> datetime:
@@ -101,6 +111,8 @@ class ScreenTimeCounter:
             self._sent_warnings.clear()
             self._locked_emitted_reason = None
             self._schedule_locked = False
+            self._in_grace = False
+            self._grace_elapsed_sec = 0
             self._save_today_usage()
 
     def _rollover_if_new_day(self, today_str: str) -> None:
@@ -111,6 +123,8 @@ class ScreenTimeCounter:
         self._quota_used_sec_by_group = {}
         self._sent_warnings.clear()
         self._locked_emitted_reason = None
+        self._in_grace = False
+        self._grace_elapsed_sec = 0
         if hasattr(self.runtime, "_extra_minutes_today"):
             self.runtime._extra_minutes_today = 0
         if getattr(self.runtime, "_lock_reason", "") == "quota_exceeded" and hasattr(
@@ -134,7 +148,11 @@ class ScreenTimeCounter:
         )
 
     def _check_warnings_and_lock(
-        self, remaining_sec: int, limit_sec: int, policy_id: str | None = None
+        self,
+        remaining_sec: int,
+        limit_sec: int,
+        elapsed_sec: int = TICK_INTERVAL_SEC,
+        policy_id: str | None = None,
     ) -> None:
         cfg = load_config()
         for mark_min in WARNING_MARKS_MIN:
@@ -163,7 +181,34 @@ class ScreenTimeCounter:
                     child_id=cfg.get("child_id") or None,
                 )
 
-        if remaining_sec <= 0:
+        if remaining_sec > 0:
+            self._in_grace = False
+            self._grace_elapsed_sec = 0
+            return
+
+        if self.grace_period_sec <= 0:
+            self._emit_lock("quota_exceeded", policy_id=policy_id)
+            return
+
+        if not self._in_grace:
+            self._in_grace = True
+            self._grace_elapsed_sec = 0
+            push_notification(
+                "grace_period",
+                {
+                    "seconds": self.grace_period_sec,
+                    "message": (
+                        f"Hết giờ! Máy sẽ khóa sau {self.grace_period_sec} giây, "
+                        "hãy lưu bài làm."
+                    ),
+                },
+            )
+            if self.on_grace_start:
+                self.on_grace_start(self.grace_period_sec)
+            return
+
+        self._grace_elapsed_sec += max(0, int(elapsed_sec))
+        if self._grace_elapsed_sec >= self.grace_period_sec:
             self._emit_lock("quota_exceeded", policy_id=policy_id)
 
     def _tick(self, elapsed_sec: int = TICK_INTERVAL_SEC, now: datetime | None = None) -> None:
@@ -205,7 +250,9 @@ class ScreenTimeCounter:
             limit_sec = self._get_quota_limit_sec(content, current_now)
             self._save_today_usage()
             remaining_sec = max(0, limit_sec - self._quota_used_sec)
-            self._check_warnings_and_lock(remaining_sec, limit_sec, policy_id=policy_id)
+            self._check_warnings_and_lock(
+                remaining_sec, limit_sec, elapsed_sec=elapsed_sec, policy_id=policy_id
+            )
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():

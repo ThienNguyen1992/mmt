@@ -50,7 +50,7 @@ def test_weekday_vs_weekend_quota_limits(isolated_db: Path) -> None:
 def test_3min_quota_expires_within_180_seconds(isolated_db: Path) -> None:
     runtime = _DummyRuntime({"quota_weekday_min": 3, "quota_weekend_min": 3})
     monday = datetime(2026, 4, 13, 14, 0)
-    counter = ScreenTimeCounter(runtime)
+    counter = ScreenTimeCounter(runtime, grace_period_sec=0)
     counter._safe_now = lambda: monday  # type: ignore[method-assign]
 
     assert counter.get_quota_remaining_sec() == 180

@@ -50,7 +50,7 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_duplicate_locked_event_suppressed_within_same_reason(isolated_db: Path) -> None:
     day1 = datetime(2026, 4, 13, 12, 0)
     runtime = _DummyRuntime({"quota_weekday_min": 1, "quota_weekend_min": 1})
-    counter = ScreenTimeCounter(runtime)
+    counter = ScreenTimeCounter(runtime, grace_period_sec=0)
     counter._safe_now = lambda: day1  # type: ignore[method-assign]
 
     # Burn full 60s quota -> triggers locked
@@ -76,7 +76,7 @@ def test_midnight_rollover_resets_counters_and_unlocks_quota_lock(isolated_db: P
     day2 = datetime(2026, 4, 14, 0, 1)
 
     runtime = _DummyRuntime({"quota_weekday_min": 1, "quota_weekend_min": 1})
-    counter = ScreenTimeCounter(runtime)
+    counter = ScreenTimeCounter(runtime, grace_period_sec=0)
     counter._safe_now = lambda: day1  # type: ignore[method-assign]
 
     for _ in range(12):
