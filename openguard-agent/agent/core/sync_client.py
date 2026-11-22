@@ -10,6 +10,7 @@ import requests
 from agent.core.cert_pinning import build_pinned_session, load_expected_fingerprint
 from agent.core.config import load_config, save_config
 from agent.core.logger import get_logger
+from agent.core.policy_enforcer import PolicyEnforcer
 
 logger = get_logger("sync_client")
 _refresh_lock = threading.Lock()
@@ -171,6 +172,39 @@ def send_heartbeat(
     return resp.json()
 
 
+def fetch_and_apply_latest_policy(
+    server_base_url: str,
+    policy_enforcer: PolicyEnforcer,
+    verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
+    session: requests.Session | None = None,
+) -> bool:
+    """Tải GET /policy/{device_id}, xác thực chữ ký Ed25519 và áp dụng ngay."""
+    cfg = load_config()
+    device_id = cfg.get("device_id") or policy_enforcer.device_id
+    if not device_id:
+        raise ValueError("Thiết bị chưa được enroll (thiếu device_id)")
+
+    url = f"{server_base_url.rstrip('/')}/policy/{device_id}"
+    resp = call_with_auto_refresh(
+        "get",
+        url,
+        server_base_url,
+        verify_cert_path=verify_cert_path,
+        pinned_cert_path=pinned_cert_path,
+        session=session,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    return policy_enforcer.apply_new_policy(
+        version=payload["version"],
+        content=payload["content"],
+        signature=payload["signature"],
+        policy_id=payload.get("policy_id", ""),
+    )
+
+
 class HeartbeatWorker(threading.Thread):
     """Worker gửi heartbeat định kỳ mỗi 60s với exponential backoff + jitter khi lỗi."""
 
@@ -183,6 +217,8 @@ class HeartbeatWorker(threading.Thread):
         verify_cert_path: str | None = None,
         pinned_cert_path: str | None = None,
         session: requests.Session | None = None,
+        policy_enforcer: PolicyEnforcer | None = None,
+        on_policy_updated: Callable[[dict | None], None] | None = None,
     ):
         super().__init__(daemon=True, name="OGK-HeartbeatWorker")
         self.server_base_url = server_base_url
@@ -192,6 +228,8 @@ class HeartbeatWorker(threading.Thread):
         self.verify_cert_path = verify_cert_path
         self.pinned_cert_path = pinned_cert_path
         self.session = session
+        self.policy_enforcer = policy_enforcer
+        self.on_policy_updated = on_policy_updated
         self.stop_event = threading.Event()
         self.last_rtt_ms: float | None = None
         self.consecutive_failures = 0
@@ -212,6 +250,23 @@ class HeartbeatWorker(threading.Thread):
             )
             self.last_rtt_ms = (time.perf_counter() - started) * 1000.0
             self.consecutive_failures = 0
+
+            if self.policy_enforcer is not None:
+                server_ver = data.get("server_policy_version", 0)
+                needs_sync = bool(data.get("policy_update_available")) or (
+                    server_ver != self.policy_enforcer.get_current_version()
+                )
+                if needs_sync and server_ver > 0:
+                    applied = fetch_and_apply_latest_policy(
+                        self.server_base_url,
+                        self.policy_enforcer,
+                        verify_cert_path=self.verify_cert_path,
+                        pinned_cert_path=self.pinned_cert_path,
+                        session=self.session,
+                    )
+                    if applied and self.on_policy_updated is not None:
+                        self.on_policy_updated(self.policy_enforcer.get_content())
+
             return data
         except Exception as exc:
             self.consecutive_failures += 1
