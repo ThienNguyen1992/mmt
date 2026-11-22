@@ -14,6 +14,7 @@ from agent.core.config import load_config
 from agent.core.event_queue import enqueue_event
 from agent.core.idle_detector import IdleDetector
 from agent.core.local_store import get_state, init_schema, set_state
+from agent.core.session_lock_monitor import SessionLockMonitor
 
 TICK_INTERVAL_SEC = 5
 
@@ -29,6 +30,7 @@ class ScreenTimeCounter:
 
         init_schema()
         self.idle_detector = IdleDetector()
+        self.session_lock_monitor = SessionLockMonitor()
         self._current_date = self._safe_today_str()
         self._quota_used_sec: int = 0
         self._quota_used_sec_by_group: dict[str, int] = {}
@@ -156,6 +158,10 @@ class ScreenTimeCounter:
             if callable(is_locked_fn) and is_locked_fn():
                 return
 
+            override_session = getattr(self.runtime, "_user_session_locked", None)
+            if self.session_lock_monitor.is_locked(override_session):
+                return
+
             override_idle = getattr(self.runtime, "_user_idle_sec", None)
             if self.idle_detector.is_idle(override_idle_sec=override_idle):
                 return
@@ -169,12 +175,14 @@ class ScreenTimeCounter:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        self.session_lock_monitor.start()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, name="screen-time", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        self.session_lock_monitor.stop()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
