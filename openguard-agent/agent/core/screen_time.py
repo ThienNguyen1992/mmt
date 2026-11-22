@@ -8,13 +8,15 @@ import time
 from datetime import datetime
 from typing import Any
 
+from shared.schedule_utils import is_allowed_now
+
 from agent.core.local_store import get_state, init_schema, set_state
 
 TICK_INTERVAL_SEC = 5
 
 
 class ScreenTimeCounter:
-    """Tracks daily screen time against weekday/weekend quotas."""
+    """Tracks daily screen time against weekday/weekend quotas and weekly schedule."""
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
@@ -26,6 +28,7 @@ class ScreenTimeCounter:
         self._current_date = self._safe_today_str()
         self._quota_used_sec: int = 0
         self._quota_used_sec_by_group: dict[str, int] = {}
+        self._schedule_locked: bool = False
         self._load_today_usage()
 
     def _safe_now(self) -> datetime:
@@ -91,6 +94,19 @@ class ScreenTimeCounter:
         with self._lock:
             current_now = now or self._safe_now()
             content = self._get_effective_content()
+
+            weekly_schedule = content.get("weekly_schedule") or ("A" * 336)
+            if not is_allowed_now(weekly_schedule, current_now):
+                if not self._schedule_locked:
+                    self._schedule_locked = True
+                    self.runtime.lock_device("outside_weekly_schedule")
+                return
+
+            if self._schedule_locked:
+                self._schedule_locked = False
+                if getattr(self.runtime, "_lock_reason", "") == "outside_weekly_schedule":
+                    self.runtime.unlock_device()
+
             self._quota_used_sec += max(0, int(elapsed_sec))
             limit_sec = self._get_quota_limit_sec(content, current_now)
             self._save_today_usage()
