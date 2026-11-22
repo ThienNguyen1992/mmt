@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.csrf import csrf_protect, generate_csrf_token
 from app.core.deps import get_current_parent
 from app.core.rate_limit import limiter
 from app.core.security import generate_session_token, hash_password, verify_password
@@ -110,10 +111,11 @@ def login(
         "message": "Đăng nhập thành công",
         "parent_id": parent.id,
         "role": parent.role,
+        "csrf_token": generate_csrf_token(session_token),
     }
 
 
-@router.post("/child-view")
+@router.post("/child-view", dependencies=[Depends(csrf_protect)])
 @limiter.limit("10/minute")
 def create_child_view_session(
     request: Request,
@@ -146,4 +148,5 @@ def create_child_view_session(
         "message": "Đã bật chế độ xem cho trẻ",
         "role": "child-view",
         "child_id": child.id,
+        "csrf_token": generate_csrf_token(token),
     }

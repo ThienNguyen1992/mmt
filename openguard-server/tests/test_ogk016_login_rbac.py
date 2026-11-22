@@ -139,29 +139,47 @@ def test_rbac_three_roles_parent_child_view_admin(rbac_env):
     assert client.post("/_test_rbac/parent-write").status_code == 401
 
     # Login as parent
-    assert (
-        client.post(
-            "/auth/login",
-            json={"email": "parenta@example.com", "password": "StrongPass123!"},
-        ).status_code
-        == 200
+    login_res = client.post(
+        "/auth/login",
+        json={"email": "parenta@example.com", "password": "StrongPass123!"},
     )
+    assert login_res.status_code == 200
+    csrf_headers = {"X-CSRF-Token": login_res.json()["csrf_token"]}
     assert client.post("/_test_rbac/parent-write").status_code == 200
     assert client.get("/_test_rbac/viewer-read").status_code == 200
     assert client.get("/_test_rbac/admin-only").status_code == 403
 
     # Parent cannot switch to another parent's child (IDOR -> 404)
-    assert client.post("/auth/child-view", json={"child_id": ids["child_b_id"]}).status_code == 404
+    assert (
+        client.post(
+            "/auth/child-view",
+            json={"child_id": ids["child_b_id"]},
+            headers=csrf_headers,
+        ).status_code
+        == 404
+    )
 
     # Switch to child-view for own child -> 200
-    cv_res = client.post("/auth/child-view", json={"child_id": ids["child_a_id"]})
+    cv_res = client.post(
+        "/auth/child-view",
+        json={"child_id": ids["child_a_id"]},
+        headers=csrf_headers,
+    )
     assert cv_res.status_code == 200
     assert cv_res.json()["role"] == "child-view"
     assert cv_res.json()["child_id"] == ids["child_a_id"]
+    cv_csrf_headers = {"X-CSRF-Token": cv_res.json()["csrf_token"]}
 
     # child-view blocked on parent write routes (403), allowed on viewer read (200)
     assert client.post("/_test_rbac/parent-write").status_code == 403
-    assert client.post("/auth/child-view", json={"child_id": ids["child_a_id"]}).status_code == 403
+    assert (
+        client.post(
+            "/auth/child-view",
+            json={"child_id": ids["child_a_id"]},
+            headers=cv_csrf_headers,
+        ).status_code
+        == 403
+    )
     viewer_res = client.get("/_test_rbac/viewer-read")
     assert viewer_res.status_code == 200
     assert viewer_res.json() == {"ok": True, "role": "child-view", "child_id": ids["child_a_id"]}
