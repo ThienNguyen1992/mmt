@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.csrf import csrf_protect, generate_csrf_token
-from app.core.deps import get_current_parent
+from app.core.deps import get_current_parent, get_current_session
 from app.core.rate_limit import limiter
 from app.core.security import generate_session_token, hash_password, verify_password
 from app.database import get_db
@@ -150,3 +150,15 @@ def create_child_view_session(
         "child_id": child.id,
         "csrf_token": generate_csrf_token(token),
     }
+
+
+@router.post("/logout", dependencies=[Depends(csrf_protect)])
+def logout(
+    response: Response,
+    db: Session = Depends(get_db),
+    db_session: SessionModel = Depends(get_current_session),
+):
+    db_session.revoked = True
+    db.commit()
+    response.delete_cookie(key="ogk_session", path="/")
+    return {"message": "Đã đăng xuất"}
