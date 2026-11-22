@@ -9,6 +9,7 @@ import requests
 
 from agent.core.cert_pinning import build_pinned_session, load_expected_fingerprint
 from agent.core.config import load_config, save_config
+from agent.core.event_queue import get_pending_batch, increment_retry, mark_synced
 from agent.core.logger import get_logger
 from agent.core.policy_enforcer import PolicyEnforcer
 
@@ -291,6 +292,87 @@ class HeartbeatWorker(threading.Thread):
     def run(self) -> None:
         while not self.stop_event.is_set():
             self.tick_once()
+            self.stop_event.wait(timeout=self.next_wait_seconds())
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+
+class EventSyncWorker(threading.Thread):
+    """Đồng bộ lô 50 event kèm idempotency_key, backoff + jitter (tối đa 600s)."""
+
+    def __init__(
+        self,
+        server_base_url: str,
+        interval_sec: float = 30.0,
+        batch_size: int = 50,
+        max_retries: int = 10,
+        max_backoff_sec: float = 600.0,
+        verify_cert_path: str | None = None,
+        pinned_cert_path: str | None = None,
+        session: requests.Session | None = None,
+        offline_tracker=None,
+    ):
+        super().__init__(daemon=True, name="OGK-EventSyncWorker")
+        self.server_base_url = server_base_url
+        self.interval_sec = interval_sec
+        self.batch_size = batch_size
+        self.max_retries = max_retries
+        self.max_backoff_sec = max_backoff_sec
+        self.verify_cert_path = verify_cert_path
+        self.pinned_cert_path = pinned_cert_path
+        self.session = session
+        self.offline_tracker = offline_tracker
+        self.stop_event = threading.Event()
+        self.consecutive_failures = 0
+
+    def sync_once(self) -> int:
+        """Đẩy lần lượt từng lô tối đa `batch_size` event chưa đồng bộ lên Server."""
+        total_synced = 0
+        url = f"{self.server_base_url.rstrip('/')}/events/batch"
+
+        while not self.stop_event.is_set():
+            batch = get_pending_batch(limit=self.batch_size, max_retries=self.max_retries)
+            if not batch:
+                break
+
+            keys = [item["idempotency_key"] for item in batch]
+            try:
+                resp = call_with_auto_refresh(
+                    "post",
+                    url,
+                    self.server_base_url,
+                    verify_cert_path=self.verify_cert_path,
+                    pinned_cert_path=self.pinned_cert_path,
+                    session=self.session,
+                    json={"events": batch},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                mark_synced(keys)
+                total_synced += len(keys)
+                self.consecutive_failures = 0
+                if self.offline_tracker is not None:
+                    self.offline_tracker.record_success()
+            except Exception as exc:
+                self.consecutive_failures += 1
+                increment_retry(keys)
+                if self.offline_tracker is not None:
+                    self.offline_tracker.record_failure()
+                logger.warning("EventSync lỗi (lần %s): %s", self.consecutive_failures, exc)
+                break
+
+        return total_synced
+
+    def next_wait_seconds(self) -> float:
+        if self.consecutive_failures == 0:
+            return self.interval_sec
+        base = min(self.max_backoff_sec, 10.0 * (2 ** (self.consecutive_failures - 1)))
+        return base + random.uniform(0.0, base * 0.2)
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            self.sync_once()
             self.stop_event.wait(timeout=self.next_wait_seconds())
 
     def stop(self) -> None:

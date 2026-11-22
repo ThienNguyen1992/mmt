@@ -104,7 +104,7 @@ class AgentRuntime:
 
     def _start_network_workers(self) -> None:
         from agent.core.command_listener import CommandListener
-        from agent.core.sync_client import HeartbeatWorker
+        from agent.core.sync_client import EventSyncWorker, HeartbeatWorker
 
         hb = HeartbeatWorker(
             self.server_base_url,
@@ -117,6 +117,15 @@ class AgentRuntime:
         )
         hb.start()
         self.workers.append(hb)
+
+        ev_sync = EventSyncWorker(
+            self.server_base_url,
+            verify_cert_path=self.verify_cert_path,
+            pinned_cert_path=self.pinned_cert_path,
+            offline_tracker=self.offline_tracker,
+        )
+        ev_sync.start()
+        self.workers.append(ev_sync)
 
         cmd = CommandListener(
             ws_url=(
