@@ -4,6 +4,7 @@ import threading
 
 import requests
 
+from agent.core.cert_pinning import build_pinned_session, load_expected_fingerprint
 from agent.core.config import load_config, save_config
 from agent.core.logger import get_logger
 
@@ -17,22 +18,31 @@ def get_device_fingerprint() -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _build_session(verify_cert_path: str | None = None) -> requests.Session:
-    session = requests.Session()
-    if verify_cert_path:
-        session.verify = verify_cert_path
-    return session
+def _get_session(
+    verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
+    session: requests.Session | None = None,
+) -> requests.Session:
+    if session is not None:
+        return session
+    pinned_fp = None if pinned_cert_path else load_config().get("pinned_cert_sha256")
+    return build_pinned_session(
+        pinned_cert_path=pinned_cert_path,
+        ca_cert_path=verify_cert_path,
+        expected_fingerprint=pinned_fp,
+    )
 
 
 def enroll(
     server_base_url: str,
     code: str,
     verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
     device_name: str | None = None,
     session: requests.Session | None = None,
 ) -> dict:
     """Ghép đôi Agent với Server bằng mã 8 ký tự và lưu tokens + public key Ed25519."""
-    http = session or _build_session(verify_cert_path)
+    http = _get_session(verify_cert_path, pinned_cert_path, session)
     resp = http.post(
         f"{server_base_url.rstrip('/')}/enroll/device",
         json={
@@ -56,6 +66,8 @@ def enroll(
             "enrolled": True,
         }
     )
+    if pinned_cert_path:
+        cfg["pinned_cert_sha256"] = load_expected_fingerprint(pinned_cert_path)
     save_config(cfg)
     logger.info("Enroll thành công device_id=%s child_id=%s", data["device_id"], data["child_id"])
     return data
@@ -64,6 +76,7 @@ def enroll(
 def refresh_access_token(
     server_base_url: str,
     verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
     session: requests.Session | None = None,
     expected_old_token: str | None = None,
 ) -> str:
@@ -74,7 +87,7 @@ def refresh_access_token(
         if expected_old_token is not None and current_token and current_token != expected_old_token:
             return current_token
 
-        http = session or _build_session(verify_cert_path)
+        http = _get_session(verify_cert_path, pinned_cert_path, session)
         resp = http.post(
             f"{server_base_url.rstrip('/')}/enroll/refresh",
             json={"refresh_token": cfg["refresh_token"]},
@@ -92,11 +105,12 @@ def call_with_auto_refresh(
     url: str,
     server_base_url: str,
     verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
     session: requests.Session | None = None,
     **kwargs,
 ) -> requests.Response:
     """Gửi HTTP request với Bearer token; tự refresh và retry 1 lần nếu gặp 401."""
-    http = session or _build_session(verify_cert_path)
+    http = _get_session(verify_cert_path, pinned_cert_path, session)
     cfg = load_config()
     current_token = cfg.get("access_token", "")
     headers = dict(kwargs.pop("headers", {}))
@@ -108,6 +122,7 @@ def call_with_auto_refresh(
         new_token = refresh_access_token(
             server_base_url,
             verify_cert_path=verify_cert_path,
+            pinned_cert_path=pinned_cert_path,
             session=http,
             expected_old_token=current_token,
         )
