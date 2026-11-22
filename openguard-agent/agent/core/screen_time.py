@@ -14,9 +14,11 @@ from agent.core.config import load_config
 from agent.core.event_queue import enqueue_event
 from agent.core.idle_detector import IdleDetector
 from agent.core.local_store import get_state, init_schema, set_state
+from agent.core.notifier import push_notification
 from agent.core.session_lock_monitor import SessionLockMonitor
 
 TICK_INTERVAL_SEC = 5
+WARNING_MARKS_MIN = [10, 5, 1]
 
 
 class ScreenTimeCounter:
@@ -131,6 +133,39 @@ class ScreenTimeCounter:
             child_id=cfg.get("child_id") or None,
         )
 
+    def _check_warnings_and_lock(
+        self, remaining_sec: int, limit_sec: int, policy_id: str | None = None
+    ) -> None:
+        cfg = load_config()
+        for mark_min in WARNING_MARKS_MIN:
+            threshold_sec = mark_min * 60
+            if remaining_sec > threshold_sec:
+                self._sent_warnings.discard(mark_min)
+                continue
+            if (
+                0 < remaining_sec <= threshold_sec
+                and limit_sec >= threshold_sec
+                and mark_min not in self._sent_warnings
+            ):
+                self._sent_warnings.add(mark_min)
+                push_notification(
+                    "quota_warning",
+                    {
+                        "minutes_left": mark_min,
+                        "message": f"Còn {mark_min} phút sử dụng máy hôm nay!",
+                    },
+                )
+                enqueue_event(
+                    event_type="quota_warning",
+                    subject=f"{mark_min}_min_left",
+                    policy_id=policy_id,
+                    device_id=cfg.get("device_id") or None,
+                    child_id=cfg.get("child_id") or None,
+                )
+
+        if remaining_sec <= 0:
+            self._emit_lock("quota_exceeded", policy_id=policy_id)
+
     def _tick(self, elapsed_sec: int = TICK_INTERVAL_SEC, now: datetime | None = None) -> None:
         with self._lock:
             current_now = now or self._safe_now()
@@ -169,8 +204,8 @@ class ScreenTimeCounter:
             self._quota_used_sec += max(0, int(elapsed_sec))
             limit_sec = self._get_quota_limit_sec(content, current_now)
             self._save_today_usage()
-            if self._quota_used_sec >= limit_sec:
-                self._emit_lock("quota_exceeded", policy_id=policy_id)
+            remaining_sec = max(0, limit_sec - self._quota_used_sec)
+            self._check_warnings_and_lock(remaining_sec, limit_sec, policy_id=policy_id)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
