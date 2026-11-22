@@ -13,6 +13,7 @@ from app.schemas.enroll import (
     RefreshTokenResponse,
 )
 from app.schemas.event import EventBatchRequest, EventBatchResponse, EventItem
+from app.schemas.heartbeat import HeartbeatRequest, HeartbeatResponse
 from app.schemas.policy import (
     AppRule,
     AppRulesConfig,
@@ -36,6 +37,8 @@ __all__ = [
     "EventItem",
     "EventBatchRequest",
     "EventBatchResponse",
+    "HeartbeatRequest",
+    "HeartbeatResponse",
     "AppRule",
     "AppRulesConfig",
     "DomainRulesConfig",

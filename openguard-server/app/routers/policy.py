@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from app.models.audit import AuditLog
 from app.models.child import Child
 from app.models.device import Device
 from app.models.parent import Parent
+from app.schemas.heartbeat import HeartbeatRequest, HeartbeatResponse
 from app.schemas.policy import PolicyResponse, PolicyUpdateRequest
 from app.services.policy_service import create_new_policy_version, get_latest_policy
 
@@ -80,4 +82,28 @@ def get_policy(
         content=json.loads(policy.content_json),
         signature=policy.signature,
         created_at=policy.created_at.isoformat(),
+    )
+
+
+@router.post("/heartbeat/{device_id}", response_model=HeartbeatResponse)
+def heartbeat(
+    device_id: str,
+    payload: HeartbeatRequest,
+    db: Session = Depends(get_db),
+    device: Device = Depends(get_current_device),
+):
+    if device.id != device_id:
+        raise HTTPException(status_code=403, detail="Token không khớp thiết bị")
+
+    now = datetime.now(timezone.utc)
+    device.last_seen_at = now
+    db.commit()
+
+    latest = get_latest_policy(db, device_id)
+    server_ver = latest.version if latest else 0
+    return HeartbeatResponse(
+        server_policy_version=server_ver,
+        policy_update_available=(server_ver != payload.policy_version),
+        server_utc=now.isoformat(),
+        pending_commands=[],
     )

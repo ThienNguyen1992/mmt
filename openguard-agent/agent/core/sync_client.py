@@ -1,6 +1,9 @@
 import hashlib
 import platform
+import random
 import threading
+import time
+from collections.abc import Callable
 
 import requests
 
@@ -129,3 +132,102 @@ def call_with_auto_refresh(
         headers["Authorization"] = f"Bearer {new_token}"
         resp = req_fn(url, headers=headers, **kwargs)
     return resp
+
+
+def send_heartbeat(
+    server_base_url: str,
+    policy_version: int,
+    quota_used_min: int,
+    is_locked: bool = False,
+    offline_since_iso: str | None = None,
+    verify_cert_path: str | None = None,
+    pinned_cert_path: str | None = None,
+    session: requests.Session | None = None,
+) -> dict:
+    """Gửi heartbeat 60s kèm trạng thái hiện tại lên Server."""
+    cfg = load_config()
+    device_id = cfg.get("device_id")
+    if not device_id:
+        raise ValueError("Thiết bị chưa được enroll (thiếu device_id)")
+
+    url = f"{server_base_url.rstrip('/')}/policy/heartbeat/{device_id}"
+    payload = {
+        "policy_version": policy_version,
+        "quota_used_min": quota_used_min,
+        "is_locked": is_locked,
+        "offline_since_iso": offline_since_iso,
+    }
+    resp = call_with_auto_refresh(
+        "post",
+        url,
+        server_base_url,
+        verify_cert_path=verify_cert_path,
+        pinned_cert_path=pinned_cert_path,
+        session=session,
+        json=payload,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+class HeartbeatWorker(threading.Thread):
+    """Worker gửi heartbeat định kỳ mỗi 60s với exponential backoff + jitter khi lỗi."""
+
+    def __init__(
+        self,
+        server_base_url: str,
+        state_provider: Callable[[], dict],
+        interval_sec: float = 60.0,
+        max_backoff_sec: float = 300.0,
+        verify_cert_path: str | None = None,
+        pinned_cert_path: str | None = None,
+        session: requests.Session | None = None,
+    ):
+        super().__init__(daemon=True, name="OGK-HeartbeatWorker")
+        self.server_base_url = server_base_url
+        self.state_provider = state_provider
+        self.interval_sec = interval_sec
+        self.max_backoff_sec = max_backoff_sec
+        self.verify_cert_path = verify_cert_path
+        self.pinned_cert_path = pinned_cert_path
+        self.session = session
+        self.stop_event = threading.Event()
+        self.last_rtt_ms: float | None = None
+        self.consecutive_failures = 0
+
+    def tick_once(self) -> dict | None:
+        state = self.state_provider()
+        started = time.perf_counter()
+        try:
+            data = send_heartbeat(
+                self.server_base_url,
+                policy_version=state.get("policy_version", 0),
+                quota_used_min=state.get("quota_used_min", 0),
+                is_locked=state.get("is_locked", False),
+                offline_since_iso=state.get("offline_since_iso"),
+                verify_cert_path=self.verify_cert_path,
+                pinned_cert_path=self.pinned_cert_path,
+                session=self.session,
+            )
+            self.last_rtt_ms = (time.perf_counter() - started) * 1000.0
+            self.consecutive_failures = 0
+            return data
+        except Exception as exc:
+            self.consecutive_failures += 1
+            logger.warning("Heartbeat lỗi (lần %s): %s", self.consecutive_failures, exc)
+            return None
+
+    def next_wait_seconds(self) -> float:
+        if self.consecutive_failures == 0:
+            return self.interval_sec
+        base = min(self.max_backoff_sec, 5.0 * (2 ** (self.consecutive_failures - 1)))
+        return base + random.uniform(0.0, base * 0.2)
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            self.tick_once()
+            self.stop_event.wait(timeout=self.next_wait_seconds())
+
+    def stop(self) -> None:
+        self.stop_event.set()
