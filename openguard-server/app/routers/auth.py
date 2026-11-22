@@ -14,7 +14,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @limiter.limit("5/minute")
 def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(Parent).filter(Parent.email == payload.email).first()
-    print()
     if existing:
         raise HTTPException(status_code=409, detail="Email đã được đăng ký")
 
