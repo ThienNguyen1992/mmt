@@ -12,6 +12,7 @@ from shared.schedule_utils import is_allowed_now
 
 from agent.core.config import load_config
 from agent.core.event_queue import enqueue_event
+from agent.core.idle_detector import IdleDetector
 from agent.core.local_store import get_state, init_schema, set_state
 
 TICK_INTERVAL_SEC = 5
@@ -27,6 +28,7 @@ class ScreenTimeCounter:
         self._lock = threading.RLock()
 
         init_schema()
+        self.idle_detector = IdleDetector()
         self._current_date = self._safe_today_str()
         self._quota_used_sec: int = 0
         self._quota_used_sec_by_group: dict[str, int] = {}
@@ -152,6 +154,10 @@ class ScreenTimeCounter:
                     self._locked_emitted_reason = None
 
             if callable(is_locked_fn) and is_locked_fn():
+                return
+
+            override_idle = getattr(self.runtime, "_user_idle_sec", None)
+            if self.idle_detector.is_idle(override_idle_sec=override_idle):
                 return
 
             self._quota_used_sec += max(0, int(elapsed_sec))
