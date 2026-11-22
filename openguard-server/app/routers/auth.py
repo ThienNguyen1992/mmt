@@ -66,6 +66,7 @@ def _register_failed_attempt(parent: Parent, db: Session) -> None:
 
 
 @router.post("/login")
+@limiter.limit("10/minute")
 def login(
     request: Request,
     payload: LoginRequest,
@@ -113,7 +114,9 @@ def login(
 
 
 @router.post("/child-view")
+@limiter.limit("10/minute")
 def create_child_view_session(
+    request: Request,
     payload: ChildViewLoginRequest,
     response: Response,
     db: Session = Depends(get_db),
