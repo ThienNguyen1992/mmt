@@ -9,6 +9,8 @@ from app.schemas.enroll import (
     CreateEnrollmentCodeResponse,
     EnrollDeviceRequest,
     EnrollDeviceResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
 )
 from app.schemas.event import EventBatchRequest, EventBatchResponse, EventItem
 
@@ -21,6 +23,8 @@ __all__ = [
     "CreateEnrollmentCodeResponse",
     "EnrollDeviceRequest",
     "EnrollDeviceResponse",
+    "RefreshTokenRequest",
+    "RefreshTokenResponse",
     "EventItem",
     "EventBatchRequest",
     "EventBatchResponse",

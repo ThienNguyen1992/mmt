@@ -28,6 +28,8 @@ from app.schemas.enroll import (
     CreateEnrollmentCodeResponse,
     EnrollDeviceRequest,
     EnrollDeviceResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
 )
 
 router = APIRouter(prefix="/enroll", tags=["enroll"])
@@ -149,3 +151,67 @@ def enroll_device(
         refresh_token=refresh_raw,
         policy_public_key_pem=pub_pem.decode("ascii"),
     )
+
+
+@router.post("/refresh", response_model=RefreshTokenResponse)
+@limiter.limit("20/minute")
+def refresh_access_token(
+    request: Request,
+    payload: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    token_hash = hash_refresh_token(payload.refresh_token)
+    db_refresh = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token_hash == token_hash,
+            RefreshToken.revoked == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not db_refresh or _as_utc(db_refresh.expires_at) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Refresh token không hợp lệ hoặc hết hạn")
+
+    device = (
+        db.query(Device)
+        .filter(Device.id == db_refresh.device_id, Device.is_active == True)  # noqa: E712
+        .first()
+    )
+    if not device:
+        raise HTTPException(status_code=401, detail="Thiết bị đã bị gỡ")
+
+    return RefreshTokenResponse(access_token=generate_device_access_token(device.id))
+
+
+@router.post("/revoke/{device_id}", dependencies=[Depends(csrf_protect)])
+def revoke_device(
+    device_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    parent: Parent = Depends(get_current_parent),
+):
+    device = (
+        db.query(Device)
+        .join(Child)
+        .filter(Device.id == device_id, Child.parent_id == parent.id)
+        .first()
+    )
+    if not device:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thiết bị")
+
+    db.query(RefreshToken).filter(RefreshToken.device_id == device_id).update({"revoked": True})
+    device.is_active = False
+
+    ip = request.client.host if request.client else "unknown"
+    db.add(
+        AuditLog(
+            parent_id=parent.id,
+            child_id=device.child_id,
+            actor_role=parent.role,
+            action="revoke_device",
+            ip_address=ip,
+            new_value=f"device_id={device_id}",
+        )
+    )
+    db.commit()
+    return {"message": "Đã gỡ thiết bị và thu hồi toàn bộ token"}

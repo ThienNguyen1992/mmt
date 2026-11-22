@@ -23,3 +23,11 @@ class EnrollDeviceResponse(BaseModel):
     access_token: str
     refresh_token: str
     policy_public_key_pem: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshTokenResponse(BaseModel):
+    access_token: str
