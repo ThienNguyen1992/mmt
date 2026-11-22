@@ -50,6 +50,21 @@ def register(request: Request, payload: RegisterRequest, db: Session = Depends(g
     return RegisterResponse(id=parent.id, email=parent.email, role=parent.role)
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _register_failed_attempt(parent: Parent, db: Session) -> None:
+    parent.failed_login_count = (parent.failed_login_count or 0) + 1
+    if parent.failed_login_count >= settings.login_max_attempts:
+        parent.locked_until = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.login_lockout_minutes
+        )
+    db.commit()
+
+
 @router.post("/login")
 def login(
     request: Request,
@@ -59,8 +74,23 @@ def login(
 ):
     now = datetime.now(timezone.utc)
     parent = db.query(Parent).filter(Parent.email == payload.email).first()
+
+    locked_until = _as_utc(parent.locked_until) if parent else None
+    if parent and locked_until and locked_until > now:
+        remaining = int((locked_until - now).total_seconds() // 60) + 1
+        raise HTTPException(
+            status_code=423,
+            detail=f"Tài khoản đang bị khóa tạm thời. Thử lại sau {remaining} phút.",
+        )
+
     if not parent or not verify_password(payload.password, parent.password_hash):
+        if parent:
+            _register_failed_attempt(parent, db)
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+
+    parent.failed_login_count = 0
+    parent.locked_until = None
+    db.commit()
 
     session_token = generate_session_token()
     expires_at = now + timedelta(hours=settings.session_expire_hours)
