@@ -10,6 +10,8 @@ from typing import Any
 
 from shared.schedule_utils import is_allowed_now
 
+from agent.core.config import load_config
+from agent.core.event_queue import enqueue_event
 from agent.core.local_store import get_state, init_schema, set_state
 
 TICK_INTERVAL_SEC = 5
@@ -29,6 +31,8 @@ class ScreenTimeCounter:
         self._quota_used_sec: int = 0
         self._quota_used_sec_by_group: dict[str, int] = {}
         self._schedule_locked: bool = False
+        self._locked_emitted_reason: str | None = None
+        self._sent_warnings: set[int] = set()
         self._load_today_usage()
 
     def _safe_now(self) -> datetime:
@@ -88,30 +92,73 @@ class ScreenTimeCounter:
             self._current_date = self._safe_today_str()
             self._quota_used_sec = 0
             self._quota_used_sec_by_group = {}
+            self._sent_warnings.clear()
+            self._locked_emitted_reason = None
+            self._schedule_locked = False
             self._save_today_usage()
+
+    def _rollover_if_new_day(self, today_str: str) -> None:
+        if today_str == self._current_date:
+            return
+        self._current_date = today_str
+        self._quota_used_sec = 0
+        self._quota_used_sec_by_group = {}
+        self._sent_warnings.clear()
+        self._locked_emitted_reason = None
+        if hasattr(self.runtime, "_extra_minutes_today"):
+            self.runtime._extra_minutes_today = 0
+        if getattr(self.runtime, "_lock_reason", "") == "quota_exceeded" and hasattr(
+            self.runtime, "unlock_device"
+        ):
+            self.runtime.unlock_device()
+        self._save_today_usage()
+
+    def _emit_lock(self, reason: str, policy_id: str | None = None) -> None:
+        if self._locked_emitted_reason == reason:
+            return
+        self.runtime.lock_device(reason)
+        self._locked_emitted_reason = reason
+        cfg = load_config()
+        enqueue_event(
+            event_type="locked",
+            subject=reason,
+            policy_id=policy_id,
+            device_id=cfg.get("device_id") or None,
+            child_id=cfg.get("child_id") or None,
+        )
 
     def _tick(self, elapsed_sec: int = TICK_INTERVAL_SEC, now: datetime | None = None) -> None:
         with self._lock:
             current_now = now or self._safe_now()
+            self._rollover_if_new_day(current_now.strftime("%Y-%m-%d"))
+
+            is_locked_fn = getattr(self.runtime, "is_locked", None)
+            if callable(is_locked_fn) and not is_locked_fn():
+                self._locked_emitted_reason = None
+
             content = self._get_effective_content()
+            policy_id = str(content.get("policy_id")) if content.get("policy_id") else None
 
             weekly_schedule = content.get("weekly_schedule") or ("A" * 336)
             if not is_allowed_now(weekly_schedule, current_now):
-                if not self._schedule_locked:
-                    self._schedule_locked = True
-                    self.runtime.lock_device("outside_weekly_schedule")
+                self._schedule_locked = True
+                self._emit_lock("outside_weekly_schedule", policy_id=policy_id)
                 return
 
             if self._schedule_locked:
                 self._schedule_locked = False
                 if getattr(self.runtime, "_lock_reason", "") == "outside_weekly_schedule":
                     self.runtime.unlock_device()
+                    self._locked_emitted_reason = None
+
+            if callable(is_locked_fn) and is_locked_fn():
+                return
 
             self._quota_used_sec += max(0, int(elapsed_sec))
             limit_sec = self._get_quota_limit_sec(content, current_now)
             self._save_today_usage()
             if self._quota_used_sec >= limit_sec:
-                self.runtime.lock_device("quota_exceeded")
+                self._emit_lock("quota_exceeded", policy_id=policy_id)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
