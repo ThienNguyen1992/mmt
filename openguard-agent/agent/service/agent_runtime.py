@@ -145,8 +145,11 @@ class AgentRuntime:
         self.workers.append(cmd)
 
     def _start_enforcement_workers(self) -> None:
-        # Sẽ được gắn dần từ E5–E8
-        pass
+        from agent.core.screen_time import ScreenTimeCounter
+
+        self.screen_time = ScreenTimeCounter(runtime=self)
+        self.screen_time.start()
+        self.workers.append(self.screen_time)
 
     def _start_housekeeping(self) -> None:
         try:

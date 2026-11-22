@@ -13,6 +13,7 @@ from shared.schedule_utils import is_allowed_now
 from agent.core.clock_guard import ClockGuard
 from agent.core.config import load_config
 from agent.core.event_queue import enqueue_event
+from agent.core.foreground_app import get_foreground_app_group
 from agent.core.idle_detector import IdleDetector
 from agent.core.local_store import get_state, init_schema, set_state
 from agent.core.notifier import push_notification
@@ -51,6 +52,7 @@ class ScreenTimeCounter:
         self._sent_warnings: set[int] = set()
         self._in_grace: bool = False
         self._grace_elapsed_sec: int = 0
+        self._exhausted_groups_notified: set[str] = set()
         self._load_today_usage()
 
     def _on_clock_tamper(self, info: dict[str, Any]) -> None:
@@ -96,6 +98,32 @@ class ScreenTimeCounter:
             limit = self._get_quota_limit_sec(content, now)
             return max(0, limit - self._quota_used_sec)
 
+    def get_group_remaining_sec(self, group: str) -> int | None:
+        """Return remaining seconds for an app group, or None if uncapped."""
+        with self._lock:
+            content = self._get_effective_content()
+            group_quotas = (content.get("app_rules") or {}).get("group_quotas_min") or {}
+            if group not in group_quotas:
+                return None
+            limit_sec = max(0, int(group_quotas[group]) * 60)
+            used_sec = self._quota_used_sec_by_group.get(group, 0)
+            return max(0, limit_sec - used_sec)
+
+    def is_group_exhausted(self, group: str) -> bool:
+        rem = self.get_group_remaining_sec(group)
+        return rem is not None and rem <= 0
+
+    def get_exhausted_groups(self) -> set[str]:
+        with self._lock:
+            content = self._get_effective_content()
+            group_quotas = (content.get("app_rules") or {}).get("group_quotas_min") or {}
+            exhausted: set[str] = set()
+            for grp, mins in group_quotas.items():
+                limit_sec = max(0, int(mins) * 60)
+                if self._quota_used_sec_by_group.get(grp, 0) >= limit_sec:
+                    exhausted.add(str(grp))
+            return exhausted
+
     def _load_today_usage(self) -> None:
         saved_date = get_state("usage_date", "")
         if saved_date == self._current_date:
@@ -129,6 +157,7 @@ class ScreenTimeCounter:
             self._schedule_locked = False
             self._in_grace = False
             self._grace_elapsed_sec = 0
+            self._exhausted_groups_notified.clear()
             self._save_today_usage()
 
     def _rollover_if_new_day(self, today_str: str) -> None:
@@ -141,6 +170,7 @@ class ScreenTimeCounter:
         self._locked_emitted_reason = None
         self._in_grace = False
         self._grace_elapsed_sec = 0
+        self._exhausted_groups_notified.clear()
         if hasattr(self.runtime, "_extra_minutes_today"):
             self.runtime._extra_minutes_today = 0
         if getattr(self.runtime, "_lock_reason", "") == "quota_exceeded" and hasattr(
@@ -263,12 +293,48 @@ class ScreenTimeCounter:
             if self.idle_detector.is_idle(override_idle_sec=override_idle):
                 return
 
-            self._quota_used_sec += max(0, int(elapsed_sec))
+            inc = max(0, int(elapsed_sec))
+            self._quota_used_sec += inc
+
+            override_fg = getattr(self.runtime, "_user_fg_process", None)
+            _, fg_group = get_foreground_app_group(content, override_process_name=override_fg)
+            if fg_group:
+                self._quota_used_sec_by_group[fg_group] = (
+                    self._quota_used_sec_by_group.get(fg_group, 0) + inc
+                )
+                self._check_group_quota(content, fg_group, policy_id=policy_id)
+
             limit_sec = self._get_quota_limit_sec(content, current_now)
             self._save_today_usage()
             remaining_sec = max(0, limit_sec - self._quota_used_sec)
             self._check_warnings_and_lock(
                 remaining_sec, limit_sec, elapsed_sec=elapsed_sec, policy_id=policy_id
+            )
+
+    def _check_group_quota(
+        self, content: dict[str, Any], group: str, policy_id: str | None = None
+    ) -> None:
+        group_quotas = (content.get("app_rules") or {}).get("group_quotas_min") or {}
+        if group not in group_quotas:
+            return
+        limit_sec = max(0, int(group_quotas[group]) * 60)
+        used_sec = self._quota_used_sec_by_group.get(group, 0)
+        if used_sec >= limit_sec and group not in self._exhausted_groups_notified:
+            self._exhausted_groups_notified.add(group)
+            cfg = load_config()
+            push_notification(
+                "group_quota_exhausted",
+                {
+                    "group": group,
+                    "message": f"Nhóm ứng dụng '{group}' đã hết ngân sách hôm nay!",
+                },
+            )
+            enqueue_event(
+                event_type="group_quota_exhausted",
+                subject=group,
+                policy_id=policy_id,
+                device_id=cfg.get("device_id") or None,
+                child_id=cfg.get("child_id") or None,
             )
 
     def start(self) -> None:
