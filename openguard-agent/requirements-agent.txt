@@ -1,0 +1,9 @@
+-e ../openguard-shared
+pywin32>=308; sys_platform == "win32"
+psutil>=6.1.0
+requests>=2.32.3
+websocket-client>=1.8.0
+pystray>=0.19.5
+Pillow>=11.0.0
+cryptography>=44.0.0
+pyinstaller>=6.11.1

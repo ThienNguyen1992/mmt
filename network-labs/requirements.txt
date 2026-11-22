@@ -1,0 +1,4 @@
+-e ../openguard-shared
+pytest>=8.3.4
+ruff>=0.8.0
+black>=24.10.0
