@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from shared.schedule_utils import is_allowed_now
 
+from agent.core.clock_guard import ClockGuard
 from agent.core.config import load_config
 from agent.core.event_queue import enqueue_event
 from agent.core.idle_detector import IdleDetector
@@ -39,6 +40,7 @@ class ScreenTimeCounter:
         self._lock = threading.RLock()
 
         init_schema()
+        self.clock_guard = ClockGuard(on_tamper_event=self._on_clock_tamper)
         self.idle_detector = IdleDetector()
         self.session_lock_monitor = SessionLockMonitor()
         self._current_date = self._safe_today_str()
@@ -51,8 +53,22 @@ class ScreenTimeCounter:
         self._grace_elapsed_sec: int = 0
         self._load_today_usage()
 
+    def _on_clock_tamper(self, info: dict[str, Any]) -> None:
+        cfg = load_config()
+        drift_sec = int(info.get("drift_sec", 0))
+        push_notification(
+            "clock_tamper",
+            {"drift_sec": drift_sec, "message": "Phát hiện thay đổi giờ hệ thống bất thường!"},
+        )
+        enqueue_event(
+            event_type="clock_tamper_detected",
+            subject=f"{info.get('kind', 'drift')}:{drift_sec}s",
+            device_id=cfg.get("device_id") or None,
+            child_id=cfg.get("child_id") or None,
+        )
+
     def _safe_now(self) -> datetime:
-        return datetime.now()
+        return self.clock_guard.get_safe_now()
 
     def _safe_today_str(self) -> str:
         return self._safe_now().strftime("%Y-%m-%d")
@@ -213,6 +229,7 @@ class ScreenTimeCounter:
 
     def _tick(self, elapsed_sec: int = TICK_INTERVAL_SEC, now: datetime | None = None) -> None:
         with self._lock:
+            self.clock_guard.check()
             current_now = now or self._safe_now()
             self._rollover_if_new_day(current_now.strftime("%Y-%m-%d"))
 
