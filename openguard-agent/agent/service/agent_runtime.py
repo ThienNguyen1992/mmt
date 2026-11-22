@@ -113,6 +113,7 @@ class AgentRuntime:
             verify_cert_path=self.verify_cert_path,
             pinned_cert_path=self.pinned_cert_path,
             policy_enforcer=self.enforcer,
+            offline_tracker=self.offline_tracker,
         )
         hb.start()
         self.workers.append(hb)

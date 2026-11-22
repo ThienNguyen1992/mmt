@@ -219,6 +219,7 @@ class HeartbeatWorker(threading.Thread):
         session: requests.Session | None = None,
         policy_enforcer: PolicyEnforcer | None = None,
         on_policy_updated: Callable[[dict | None], None] | None = None,
+        offline_tracker=None,
     ):
         super().__init__(daemon=True, name="OGK-HeartbeatWorker")
         self.server_base_url = server_base_url
@@ -230,12 +231,16 @@ class HeartbeatWorker(threading.Thread):
         self.session = session
         self.policy_enforcer = policy_enforcer
         self.on_policy_updated = on_policy_updated
+        self.offline_tracker = offline_tracker
         self.stop_event = threading.Event()
         self.last_rtt_ms: float | None = None
         self.consecutive_failures = 0
 
     def tick_once(self) -> dict | None:
         state = self.state_provider()
+        offline_since = state.get("offline_since_iso")
+        if offline_since is None and self.offline_tracker is not None:
+            offline_since = self.offline_tracker.get_offline_since_iso()
         started = time.perf_counter()
         try:
             data = send_heartbeat(
@@ -243,13 +248,15 @@ class HeartbeatWorker(threading.Thread):
                 policy_version=state.get("policy_version", 0),
                 quota_used_min=state.get("quota_used_min", 0),
                 is_locked=state.get("is_locked", False),
-                offline_since_iso=state.get("offline_since_iso"),
+                offline_since_iso=offline_since,
                 verify_cert_path=self.verify_cert_path,
                 pinned_cert_path=self.pinned_cert_path,
                 session=self.session,
             )
             self.last_rtt_ms = (time.perf_counter() - started) * 1000.0
             self.consecutive_failures = 0
+            if self.offline_tracker is not None:
+                self.offline_tracker.record_success()
 
             if self.policy_enforcer is not None:
                 server_ver = data.get("server_policy_version", 0)
@@ -270,6 +277,8 @@ class HeartbeatWorker(threading.Thread):
             return data
         except Exception as exc:
             self.consecutive_failures += 1
+            if self.offline_tracker is not None:
+                self.offline_tracker.record_failure()
             logger.warning("Heartbeat lỗi (lần %s): %s", self.consecutive_failures, exc)
             return None
 
