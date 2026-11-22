@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 import app.models  # noqa: F401 (ensure models registered on Base.metadata)
 from app.core.rate_limit import limiter
 from app.database import Base, engine
-from app.routers import auth, enroll, events, policy
+from app.routers import auth, commands, enroll, events, policy
 
 
 @asynccontextmanager
@@ -30,6 +30,7 @@ app.include_router(auth.router)
 app.include_router(enroll.router)
 app.include_router(events.router)
 app.include_router(policy.router)
+app.include_router(commands.router)
 
 
 @app.get("/health")
