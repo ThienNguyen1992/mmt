@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 import app.models  # noqa: F401 (ensure models registered on Base.metadata)
 from app.core.rate_limit import limiter
 from app.database import Base, engine
-from app.routers import auth
+from app.routers import auth, events
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 app.include_router(auth.router)
+app.include_router(events.router)
 
 
 @app.get("/health")
